@@ -1,7 +1,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api import health
-from app.core.logging import configure_logging
+from app.api import chat
+from app.core.logging import configure_logging, RequestIDMiddleware
 from app.core.settings import Settings
 
 def get_app() -> FastAPI:
@@ -14,6 +15,8 @@ def get_app() -> FastAPI:
         description = "Unified LLM inference gateway"
     )
 
+    app.add_middleware(RequestIDMiddleware)
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -23,6 +26,7 @@ def get_app() -> FastAPI:
     )
 
     app.include_router(health.router)
+    app.include_router(chat.router)
 
     @app.get("/")
     async def root():

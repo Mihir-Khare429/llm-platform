@@ -14,6 +14,18 @@ from app.schemas.chat import (
     Usage,
 )
 
+import time
+from uuid import uuid4
+
+def _gen_chat_id() -> str:
+    return f"chatcmpl-{uuid4().hex[:12]}"
+
+def _safe_created(value: Any) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return int(time.time())
+
 # ---- Custom exceptions for precise error mapping ----
 class UpstreamTimeout(Exception):
     pass
@@ -167,7 +179,7 @@ class LLMClient:
 
             created_ts = _iso8601_to_unix(data.get("created_at"))
             return ChatCompletionResponse(
-                id=None,
+                id=_gen_chat_id(),
                 object="chat.completion",
                 created=created_ts or 0,
                 model=data.get("model", req.model),
@@ -194,29 +206,52 @@ class LLMClient:
                 raise UpstreamHTTPError(r.status_code, _safe_json(r))
 
             data = r.json()
-            # Normalize to our Pydantic model
-            choices = data.get("choices", [])
-            if not choices:
-                choices = [{"index": 0, "message": {"role": "assistant", "content": ""}, "finish_reason": "stop"}]
-            usage_json = data.get("usage", {}) or {}
-            usage = Usage(
-                prompt_tokens=int(usage_json.get("prompt_tokens", 0) or 0),
-                completion_tokens=int(usage_json.get("completion_tokens", 0) or 0),
-                total_tokens=int(usage_json.get("total_tokens", 0) or 0),
-            )
-            return ChatCompletionResponse(
-                id=data.get("id"),
-                object=data.get("object", "chat.completion"),
-                created=int(data.get("created") or 0),
-                model=data.get("model", body.get("model", req.model)),
-                choices=[
+
+            # Ensure id is a non-empty string
+            resp_id = data.get("id")
+            if not isinstance(resp_id, str) or not resp_id:
+                resp_id = _gen_chat_id()
+
+            # Ensure created is an int (fallback to now)
+            created_val = _safe_created(data.get("created"))
+
+            # Normalize choices
+            raw_choices = data.get("choices") or []
+            if not isinstance(raw_choices, list) or not raw_choices:
+                raw_choices = [{"index": 0, "message": {"role": "assistant", "content": ""}, "finish_reason": "stop"}]
+
+            choices: list[ChatChoice] = []
+            for i, c in enumerate(raw_choices):
+                msg = c.get("message") or {"role": "assistant", "content": ""}
+                # Guard against malformed message
+                role = msg.get("role", "assistant") or "assistant"
+                content = msg.get("content", "") or ""
+                choices.append(
                     ChatChoice(
                         index=c.get("index", i),
-                        message=ChoiceMessage(**(c.get("message") or {"role": "assistant", "content": ""})),
+                        message=ChoiceMessage(role=role, content=content),
                         finish_reason=c.get("finish_reason") or "stop",
                     )
-                    for i, c in enumerate(choices)
-                ],
+                )
+
+            # Normalize usage
+            usage_json = data.get("usage") or {}
+            prompt_tokens = int(usage_json.get("prompt_tokens", 0) or 0)
+            completion_tokens = int(usage_json.get("completion_tokens", 0) or 0)
+            total_tokens = int(usage_json.get("total_tokens", prompt_tokens + completion_tokens) or 0)
+
+            usage = Usage(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+            )
+
+            return ChatCompletionResponse(
+                id=resp_id,
+                object=data.get("object", "chat.completion"),
+                created=created_val,
+                model=data.get("model", body.get("model", req.model)),
+                choices=choices,
                 usage=usage,
             )
 
